@@ -1,0 +1,115 @@
+#!/sbin/sh
+
+export ZIPFILE="$3"
+export OUTFD="/proc/self/fd/$2"
+export TMP="/tmp"
+
+bb="$TMP/busybox-arm"
+l="$TMP/bin"
+
+ui_print() {
+  echo "ui_print $1" > "$OUTFD";
+  echo "ui_print" > "$OUTFD";
+}
+
+unzip -o "$ZIPFILE" "install.sh" -d "$TMP";
+unzip -o "$ZIPFILE" "magiskboot" -d "$TMP";
+unzip -o "$ZIPFILE" "libapjni.so" -d "$TMP";
+unzip -o "$ZIPFILE" "kpimg-android" -d "$TMP";
+unzip -o "$ZIPFILE" "kptools-android" -d "$TMP";
+unzip -o "$ZIPFILE" "superkey-here.txt" -d "$TMP";
+
+cd "$TMP"
+
+# getprop
+GETPROP=$(which getprop)
+if [ -z "$GETPROP" ]; then
+   GETPROP=/system/bin/getprop
+   [ ! -e "$GETPROP" ] && GETPROP=/sbin/getprop
+   [ ! -e "$GETPROP" ] && GETPROP=$(which resetprop)
+fi
+
+ARCH=$(uname -m)
+
+if [ "$ARCH" = "aarch64" ]; then
+  ui_print "ARCH is arm64..."
+else
+  ui_print "Not is arm64, aborting..."
+  exit 1
+fi
+
+is_ab_device() {
+local S="$($GETPROP "ro.boot.slot_suffix")"
+local U="$($GETPROP "ro.build.ab_update")"
+    if [ -n "$S" -a "$U" = "true" ]; then
+        echo "1"
+    else
+        echo "0"
+    fi
+}
+
+if [ "$(is_ab_device)" = "1" ]; then
+    slot_suffix=$($GETPROP ro.boot.slot_suffix)
+    dd if="/dev/block/by-name/boot$slot_suffix" of="$TMP/boot.img"
+else
+    dd if=/dev/block/by-name/boot of="$TMP/boot.img"
+fi
+
+if [ -f "$TMP/boot.img" ]; then
+    ui_print "get boot success"
+else
+    ui_print "get boot failed"
+    exit 1
+fi
+
+cp "$TMP/boot.img" /sdcard/
+
+ui_print "backup boot.img in sdcard"
+
+ui_print "unpacking.."
+
+./magiskboot unpack "$TMP/boot.img" || exit $?
+
+mv "$TMP/kernel" "$TMP/kernel.ori"
+
+SUPERKEY="$(cat "$TMP/superkey-here.txt")"
+
+if [ -z "$SUPERKEY" ]; then
+  ui_print "Superkey must not be empty."
+  exit 1
+fi
+
+ui_print "Your superkey is: $SUPERKEY"
+
+ui_print "Patching kernel"
+./kptools-android -p "$TMP/kernel.ori" --skey "$SUPERKEY" --kpimg "$TMP/kpimg-android" --out "$TMP/kernel"
+
+if [ -f "$TMP/kernel" ]; then
+    ui_print "patch kernel success"
+else
+    ui_print "patch kernel failed"
+    exit 1
+fi
+
+ui_print "Repacking boot image"
+./magiskboot repack "$TMP/boot.img"
+
+if [ -f "$TMP/new-boot.img" ]; then
+    ui_print "repack boot success"
+else
+    ui_print "repack boot failed"
+    exit 1
+fi
+
+ui_print "flashing..."
+
+if [ "$(is_ab_device)" = "1" ]; then
+    slot_suffix=$($GETPROP ro.boot.slot_suffix)
+    blockdev --setrw "/dev/block/by-name/boot$slot_suffix"
+    dd if=new-boot.img of="/dev/block/by-name/boot$slot_suffix"
+else
+    blockdev --setrw /dev/block/by-name/boot
+    dd if=new-boot.img of=/dev/block/by-name/boot
+fi
+
+ui_print "flash done"
